@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Private Chat</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    body {
+      background: #0f172a;
+      color: #f8fafc;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 12px;
+    }
+    .chat-card {
+      width: 100%;
+      max-width: 480px;
+      height: 620px;
+      background: #1e293b;
+      border-radius: 16px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    }
+    .header {
+      padding: 16px;
+      background: #334155;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #475569;
+    }
+    .status-dot {
+      height: 10px;
+      width: 10px;
+      background: #22c55e;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+    }
+    .messages-container {
+      flex: 1;
+      padding: 16px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .message {
+      max-width: 75%;
+      padding: 10px 14px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    .message.sent {
+      align-self: flex-end;
+      background: #3b82f6;
+      color: #ffffff;
+      border-bottom-right-radius: 2px;
+    }
+    .message.received {
+      align-self: flex-start;
+      background: #334155;
+      color: #e2e8f0;
+      border-bottom-left-radius: 2px;
+    }
+    .sender-name {
+      font-size: 11px;
+      opacity: 0.75;
+      margin-bottom: 3px;
+    }
+    .typing-bar {
+      padding: 4px 16px;
+      font-size: 12px;
+      color: #94a3b8;
+      font-style: italic;
+      min-height: 22px;
+    }
+    .input-bar {
+      display: flex;
+      padding: 12px;
+      background: #1e293b;
+      border-top: 1px solid #334155;
+      gap: 8px;
+    }
+    input[type="text"] {
+      flex: 1;
+      background: #0f172a;
+      border: 1px solid #475569;
+      color: white;
+      padding: 10px 14px;
+      border-radius: 24px;
+      outline: none;
+      font-size: 14px;
+    }
+    input[type="text"]:focus {
+      border-color: #3b82f6;
+    }
+    button {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 24px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+    }
+    button:hover {
+      background: #2563eb;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  </style>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-auth.js";
+    import {
+      getFirestore, collection, addDoc, query, orderBy, onSnapshot,
+      serverTimestamp, doc, setDoc, deleteDoc
+    } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js";
+
+    // Firebase configuration with your project credentials
+    const firebaseConfig = {
+      apiKey: "AIzaSyC5FzCvnz3918GpyOWko3ZDI1jXwZnU1i0",
+      authDomain: "newspace-sp01.firebaseapp.com",
+      projectId: "newspace-sp01",
+      storageBucket: "newspace-sp01.firebasestorage.app",
+      messagingSenderId: "1013425614979",
+      appId: "1:1013425614979:web:562e01f11705baa6f46bb6",
+      measurementId: "G-H3F2PH6X99"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    const roomId = "chat-room-1";
+    let currentUser = null;
+
+    // Display name management
+    let savedName = sessionStorage.getItem("chat_display_name");
+    if (!savedName) {
+      savedName = prompt("Enter your display name (max 40 characters):") || "User";
+      savedName = savedName.trim().slice(0, 40) || "User";
+      sessionStorage.setItem("chat_display_name", savedName);
+    }
+    const currentUserName = savedName;
+
+    const userDisplay = document.getElementById("user-display");
+    const messagesContainer = document.getElementById("messages");
+    const typingIndicator = document.getElementById("typing-indicator");
+    const messageInput = document.getElementById("message-input");
+    const sendBtn = document.getElementById("send-btn");
+
+    let typingTimeout = null;
+
+    // Authenticate Anonymously
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        currentUser = user;
+        userDisplay.textContent = `Logged in: ${currentUserName}`;
+        sendBtn.disabled = false;
+        initChat();
+      } else {
+        signInAnonymously(auth).catch((err) => {
+          userDisplay.textContent = "Auth connection error";
+          console.error("Authentication failed:", err);
+        });
+      }
+    });
+
+    function initChat() {
+      const messagesCol = collection(db, "rooms", roomId, "messages");
+      const typingCol = collection(db, "rooms", roomId, "typing");
+      const myTypingRef = doc(db, "rooms", roomId, "typing", currentUser.uid);
+
+      // Listen for messages in real time (XSS-safe)
+      const q = query(messagesCol, orderBy("timestamp", "asc"));
+      onSnapshot(q, (snapshot) => {
+        messagesContainer.innerHTML = "";
+        if (snapshot.empty) {
+          const emptyNotice = document.createElement("div");
+          emptyNotice.style.textAlign = "center";
+          emptyNotice.style.color = "#64748b";
+          emptyNotice.style.fontSize = "13px";
+          emptyNotice.textContent = "No messages yet. Say hello!";
+          messagesContainer.appendChild(emptyNotice);
+          return;
+        }
+
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          const isMe = data.senderId === currentUser.uid;
+
+          const msgEl = document.createElement("div");
+          msgEl.className = `message ${isMe ? "sent" : "received"}`;
+
+          const senderEl = document.createElement("div");
+          senderEl.className = "sender-name";
+          senderEl.textContent = data.senderName || "Friend";
+
+          const textEl = document.createElement("div");
+          textEl.textContent = data.text || "";
+
+          msgEl.appendChild(senderEl);
+          msgEl.appendChild(textEl);
+          messagesContainer.appendChild(msgEl);
+        });
+
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+      });
+
+      // Listen for typing indicator
+      onSnapshot(typingCol, (snapshot) => {
+        const typers = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          if (docSnap.id !== currentUser.uid && data.typing) {
+            typers.push(data.user || "Someone");
+          }
+        });
+
+        if (typers.length > 0) {
+          typingIndicator.textContent = `${typers.join(", ")} is typing...`;
+        } else {
+          typingIndicator.textContent = "";
+        }
+      });
+
+      // Emit typing status on input with debounce
+      messageInput.addEventListener("input", async () => {
+        if (!currentUser) return;
+        await setDoc(myTypingRef, { typing: true, user: currentUserName, updatedAt: Date.now() });
+
+        clearTimeout(typingTimeout);
+        typingTimeout = setTimeout(async () => {
+          await deleteDoc(myTypingRef);
+        }, 2500);
+      });
+
+      // Send Message
+      window.sendMessage = async function () {
+        const text = messageInput.value.trim();
+        if (!text || !currentUser || text.length > 2000) return;
+
+        // Clear typing status immediately on submit
+        clearTimeout(typingTimeout);
+        deleteDoc(myTypingRef).catch(() => {});
+
+        try {
+          await addDoc(messagesCol, {
+            senderId: currentUser.uid,
+            senderName: currentUserName,
+            text: text,
+            timestamp: serverTimestamp()
+          });
+          messageInput.value = "";
+        } catch (err) {
+          console.error("Failed to send message:", err);
+        }
+      };
+    }
+  </script>
+</head>
+<body>
+  <div class="chat-card">
+    <div class="header">
+      <div>
+        <span class="status-dot"></span>
+        <strong id="user-display">Connecting...</strong>
+      </div>
+      <span style="font-size: 12px; color: #94a3b8;">Room: #friends</span>
+    </div>
+
+    <div class="messages-container" id="messages">
+      <div style="text-align: center; color: #64748b; font-size: 13px;">Connecting to chat...</div>
+    </div>
+
+    <div class="typing-bar" id="typing-indicator"></div>
+
+    <form class="input-bar" onsubmit="event.preventDefault(); sendMessage();">
+      <input type="text" id="message-input" placeholder="Type a message..." autocomplete="off" maxlength="2000" />
+      <button type="submit" id="send-btn" disabled>Send</button>
+    </form>
+  </div>
+</body>
+</html>
